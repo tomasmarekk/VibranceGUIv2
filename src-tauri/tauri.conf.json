@@ -10,7 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{"label":"main","title":"VibranceGUI v2","width":980,"height":820,"minWidth":760,"minHeight":650,"visible":false,"center":true}],
+    "windows": [{"label":"main","title":"VibranceGUI v2","width":980,"height":820,"minWidth":760,"minHeight":650,"visible":false,"center":true,"theme":"Dark","backgroundColor":"#101318"}],
     "security": {"csp":"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; font-src 'self' data:; connect-src ipc: http://ipc.localhost"}
   },
   "bundle": {
