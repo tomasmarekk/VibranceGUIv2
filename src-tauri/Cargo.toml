@@ -1,0 +1,36 @@
+# Native Windows controller and the Tauri IPC boundary.
+# Vendor driver DLLs are loaded from Windows, never bundled from reference sources.
+[package]
+name = "vibrance-gui-v2"
+version = "2.0.0"
+description = "Automatic per-application vibrance, brightness and gamma for Windows"
+authors = ["Tomas Marek"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "vibrance_gui_v2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+libloading = "0.9"
+tempfile = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_ColorSystem", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_Devices_Display"] }
+
+[lints]
+workspace = true

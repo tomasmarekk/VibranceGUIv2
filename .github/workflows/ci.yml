@@ -1,0 +1,62 @@
+# All main and pull-request changes pass the same Windows checks used for releases.
+# Artifacts contain only staged release files; private reference material is never uploaded.
+name: Windows CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Test and build Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Set up stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'Rust setup failed' }
+      - name: Cache Rust dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: windows-cargo-${{ hashFiles('Cargo.lock') }}
+      - name: Check, test and package
+        run: ./scripts/verify.ps1 -Build
+      - name: Upload Windows build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: VibranceGUIv2-windows-x64-${{ github.sha }}
+          path: |
+            artifacts/VibranceGUIv2_*_x64-portable.exe
+            artifacts/VibranceGUIv2_*_x64-setup.exe
+            artifacts/SHA256SUMS.txt
+            artifacts/LICENSE.txt
+            artifacts/THIRD-PARTY-LICENSES.txt
+          if-no-files-found: error
+          retention-days: 14

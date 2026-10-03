@@ -1,0 +1,25 @@
+# The desktop shell and its native observer share one locked Rust workspace.
+# Keeping the lock at the root makes local and release builds use identical crates.
+[workspace]
+members = ["src-tauri"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+overflow-checks = true

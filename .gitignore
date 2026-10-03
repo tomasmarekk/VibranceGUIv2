@@ -1,0 +1,14 @@
+/reference-source
+AGENTS.md
+/.agents
+/docs
+
+# Local reference material and build outputs never belong in releases.
+/node_modules/
+/dist/
+/target/
+/src-tauri/target/
+/src-tauri/gen/
+/artifacts/
+*.log
+*.tsbuildinfo

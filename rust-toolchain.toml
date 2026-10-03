@@ -1,0 +1,5 @@
+# Stable toolchain shared by development and GitHub Actions.
+# Cargo.lock fixes the application's dependency graph.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
