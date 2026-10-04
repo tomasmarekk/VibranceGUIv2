@@ -102,19 +102,21 @@ fn bitmap_bgra(dc: &ScreenDc, bitmap: HBITMAP, width: i32, height: i32) -> Optio
 /// Converts icon BGRA data to straight RGBA, deriving alpha from the AND mask
 /// for legacy icons whose color bitmap carries no alpha channel.
 fn icon_rgba(color: &[u8], mask: Option<&[u8]>) -> Vec<u8> {
-    let has_alpha = color.chunks_exact(4).any(|pixel| pixel[3] != 0);
-    color
-        .chunks_exact(4)
+    let (pixels, _) = color.as_chunks::<4>();
+    let has_alpha = pixels.iter().any(|&[_, _, _, alpha]| alpha != 0);
+    let mask = mask.map(|mask| mask.as_chunks::<4>().0);
+    pixels
+        .iter()
         .enumerate()
-        .flat_map(|(index, pixel)| {
+        .flat_map(|(index, &[blue, green, red, alpha])| {
             let alpha = if has_alpha {
-                pixel[3]
+                alpha
             } else {
                 // A black AND-mask pixel is opaque; a white one shows the background.
-                mask.and_then(|mask| mask.get(index * 4))
-                    .map_or(255, |value| if *value == 0 { 255 } else { 0 })
+                mask.and_then(|mask| mask.get(index))
+                    .map_or(255, |&[value, ..]| if value == 0 { 255 } else { 0 })
             };
-            [pixel[2], pixel[1], pixel[0], alpha]
+            [red, green, blue, alpha]
         })
         .collect()
 }
@@ -185,12 +187,17 @@ pub(crate) fn executable_icon_png(path: &str, size: u16) -> Option<Vec<u8>> {
     }
     let dc = ScreenDc::new()?;
     let color_pixels = bitmap_bgra(&dc, color.0, width, height)?;
-    let mask_pixels =
-        if color_pixels.chunks_exact(4).all(|pixel| pixel[3] == 0) && !mask.0.is_null() {
-            bitmap_bgra(&dc, mask.0, width, height)
-        } else {
-            None
-        };
+    let mask_pixels = if color_pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .all(|&[_, _, _, alpha]| alpha == 0)
+        && !mask.0.is_null()
+    {
+        bitmap_bgra(&dc, mask.0, width, height)
+    } else {
+        None
+    };
     let rgba = icon_rgba(&color_pixels, mask_pixels.as_deref());
     encode_png(
         &rgba,
@@ -221,8 +228,10 @@ fn query_value<'a>(block: &'a [u8], key: &str, unit: usize) -> Option<&'a [u8]> 
 
 fn utf16_string(bytes: &[u8]) -> String {
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| u16::from_le_bytes(pair))
         .take_while(|unit| *unit != 0)
         .collect();
     String::from_utf16_lossy(&units)
@@ -248,12 +257,16 @@ pub(crate) fn executable_description(path: &str) -> Option<String> {
     let mut languages: Vec<String> = query_value(&block, "\\VarFileInfo\\Translation", 1)
         .map(|translations| {
             translations
-                .chunks_exact(4)
-                .map(|pair| {
-                    let language = u16::from_le_bytes([pair[0], pair[1]]);
-                    let codepage = u16::from_le_bytes([pair[2], pair[3]]);
-                    format!("{language:04x}{codepage:04x}")
-                })
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(
+                    |&[language_low, language_high, codepage_low, codepage_high]| {
+                        let language = u16::from_le_bytes([language_low, language_high]);
+                        let codepage = u16::from_le_bytes([codepage_low, codepage_high]);
+                        format!("{language:04x}{codepage:04x}")
+                    },
+                )
                 .collect()
         })
         .unwrap_or_default();
