@@ -6,6 +6,7 @@ mod platform;
 mod settings;
 
 use anyhow::Context;
+use base64::{Engine as _, prelude::BASE64_STANDARD};
 use observer::{AppState, Observer, SharedState};
 use settings::{ColorSettings, ConfigStore, GlobalSettings, Profile};
 use std::{
@@ -16,6 +17,11 @@ use std::{
 use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::DialogExt;
+
+/// Edge length of extracted program icons, sharp at 150% scaling in the profile header.
+const ICON_SIZE: u16 = 96;
+/// Bounds one icon request so the UI cannot queue unbounded shell work.
+const MAX_ICON_REQUEST: usize = 512;
 
 struct DesktopState {
     snapshot: SharedState,
@@ -172,6 +178,28 @@ fn set_enabled(
     result
 }
 
+/// Prefers the name Windows shows in Task Manager over the bare file stem.
+fn display_name(executable_path: &str) -> String {
+    platform::executable_description(executable_path)
+        .unwrap_or_else(|| settings::executable_stem(executable_path))
+}
+
+/// Accepts a window title as a program name only when it looks like one.
+///
+/// Games without version resources usually title their window with the game's name,
+/// while document apps add separators such as "file.txt - Editor"; those are skipped.
+fn title_name(title: &str) -> Option<String> {
+    let title = title.trim();
+    let document_like = [" - ", " – ", " — ", " | "]
+        .iter()
+        .any(|separator| title.contains(separator));
+    (!title.is_empty()
+        && title.chars().count() <= 40
+        && !document_like
+        && !title.chars().any(char::is_control))
+    .then(|| title.to_owned())
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Executable {
@@ -186,7 +214,9 @@ async fn list_running_apps() -> Result<Vec<Executable>, String> {
         platform::running_apps()
             .into_iter()
             .map(|process| Executable {
-                name: settings::executable_stem(&process.exe_name),
+                name: platform::executable_description(&process.exe_path)
+                    .or_else(|| title_name(&process.title))
+                    .unwrap_or_else(|| settings::executable_stem(&process.exe_name)),
                 executable_path: process.exe_path,
                 pid: process.pid,
             })
@@ -217,13 +247,38 @@ async fn pick_executable(app: tauri::AppHandle) -> Result<Option<Executable>, St
             .to_owned();
         settings::validate_executable(&executable_path).map_err(|error| error.to_string())?;
         Ok(Some(Executable {
-            name: settings::executable_stem(&executable_path),
+            name: display_name(&executable_path),
             executable_path,
             pid: 0,
         }))
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+/// Returns PNG data URLs in request order; unusable paths and icon-less files yield `None`.
+#[tauri::command]
+async fn executable_icons(paths: Vec<String>) -> Result<Vec<Option<String>>, String> {
+    if paths.len() > MAX_ICON_REQUEST {
+        return Err(format!(
+            "at most {MAX_ICON_REQUEST} icons can be requested at once"
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .iter()
+            .map(|path| {
+                settings::validate_executable(path).ok()?;
+                let png = platform::executable_icon_png(path, ICON_SIZE)?;
+                Some(format!(
+                    "data:image/png;base64,{}",
+                    BASE64_STANDARD.encode(png)
+                ))
+            })
+            .collect()
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 fn show_window(app: &tauri::AppHandle) {
@@ -321,7 +376,8 @@ pub fn run() -> anyhow::Result<()> {
             remove_profile,
             set_enabled,
             list_running_apps,
-            pick_executable
+            pick_executable,
+            executable_icons
         ])
         .setup(|app| {
             let directory = app.path().app_config_dir()?;
@@ -403,4 +459,26 @@ pub fn run() -> anyhow::Result<()> {
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::title_name;
+
+    #[test]
+    fn game_window_titles_become_program_names() {
+        assert_eq!(title_name("  VALORANT "), Some("VALORANT".into()));
+        assert_eq!(
+            title_name("Counter-Strike 2"),
+            Some("Counter-Strike 2".into())
+        );
+    }
+
+    #[test]
+    fn document_and_unusable_titles_are_ignored() {
+        assert_eq!(title_name("notes.txt - Notepad"), None);
+        assert_eq!(title_name("Inbox | Mail"), None);
+        assert_eq!(title_name(""), None);
+        assert_eq!(title_name(&"x".repeat(41)), None);
+    }
 }

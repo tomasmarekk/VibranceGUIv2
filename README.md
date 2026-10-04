@@ -2,7 +2,7 @@
 
 A Windows desktop utility that switches digital vibrance, brightness, gamma and optional display resolution when you focus a game or application. The native controller is written in Rust; the desktop interface uses Tauri 2, React and HeroUI v3 in a dark theme only.
 
-The layout keeps the original VibranceGUI workflow: global settings and desktop levels above a program library, with **Add**, **Add manually**, **Edit** and **Remove** controls. Each program has its own color profile. The implementation and visual assets are new; the original reference sources are not distributed.
+The layout keeps the original VibranceGUI workflow in one window with a built-in title bar: global settings and Windows colors above a program library with **Add** and **Add manually**. Each program appears as a tile with its own icon; selecting it opens its color profile, where it can be saved or removed. The implementation and visual assets are new; the original reference sources are not distributed.
 
 ## Install
 
@@ -18,10 +18,10 @@ Windows 10/11 x64 and an installed display driver are required. Digital vibrance
 
 ## Use
 
-1. Set your **Desktop** digital vibrance, brightness and gamma.
+1. Set your **Windows colors**: digital vibrance, brightness and gamma.
 2. Choose **Add** for a running application, or **Add manually** for an executable.
-3. Adjust its profile and optionally select a supported resolution.
-4. Focus that application to activate its profile; focus another application to return to desktop levels.
+3. Adjust its profile, optionally select a supported resolution, and choose **Add program**. Select a program tile later to change or remove its profile.
+4. Focus that application to activate its profile; focus another application to return to the Windows colors.
 
 The native observer checks foreground changes every 150 ms. **Primary monitor only** means the Windows primary display; otherwise profiles apply to all connected supported displays. Profiles match an executable name by default, with exact-path matching available. **Never change resolution** disables profile resolution changes. Pause or exit restores the display state captured before the app took control. Minimize hides the window to the tray; closing the window or choosing **Exit and restore display settings** in the tray menu quits the application. Autostart launches minimized.
 
@@ -30,7 +30,7 @@ Settings and the application log are stored at `%APPDATA%\com.tomasmarekk.vibran
 Launch with `--paused` to inspect the interface and detected capabilities before applying any display settings. The tray menu or interface can then resume profiles. `--diagnostics` emits capability JSON without applying color or resolution changes; for a GUI executable, redirect its output explicitly:
 
 ```powershell
-Start-Process -FilePath .\VibranceGUIv2_2.0.0_x64-portable.exe `
+Start-Process -FilePath .\VibranceGUIv2_2.1.0_x64-portable.exe `
     -ArgumentList '--diagnostics' -Wait -WindowStyle Hidden `
     -RedirectStandardOutput .\diagnostics.json -RedirectStandardError .\diagnostics-errors.txt
 ```

@@ -2,11 +2,15 @@
 // Preview state is deliberately ephemeral and visibly identified by the interface.
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { DEFAULT_COLOR } from "./types";
 import type { AppState, ColorSettings, Profile, RunningApp, Settings } from "./types";
 
 /** True only outside the native webview; never indicates a connected GPU. */
 export const isPreview = !isTauri();
+
+/** The frameless native window driven by the custom title bar; null in the browser preview. */
+export const appWindow = isPreview ? null : getCurrentWindow();
 
 let previewState: AppState = {
   settings: { autostart: false, primaryOnly: false, neverChangeResolution: false },
@@ -21,9 +25,9 @@ let previewState: AppState = {
     message: null,
   },
   resolutions: [
-    { width: 1920, height: 1080, refreshRate: 60 },
-    { width: 1920, height: 1080, refreshRate: 144 },
     { width: 2560, height: 1440, refreshRate: 144 },
+    { width: 1920, height: 1080, refreshRate: 144 },
+    { width: 1920, height: 1080, refreshRate: 60 },
   ],
 };
 const subscribers = new Set<(state: AppState) => void>();
@@ -68,6 +72,7 @@ export const api = {
   async removeProfile(id: string): Promise<AppState> {
     if (!isPreview) return invoke("remove_profile", { id });
     previewState.profiles = previewState.profiles.filter((profile) => profile.id !== id);
+    if (previewState.status.activeProfileId === id) previewState.status.activeProfileId = null;
     return publishPreview();
   },
   /** Pauses or resumes the observer; native pause restores original display state. */
@@ -80,14 +85,20 @@ export const api = {
   async listRunningApps(): Promise<RunningApp[]> {
     if (!isPreview) return invoke("list_running_apps");
     return [
-      { name: "Example game (preview)", executablePath: "C:\\Preview\\ExampleGame.exe", pid: 100 },
-      { name: "Example editor (preview)", executablePath: "C:\\Preview\\ExampleEditor.exe", pid: 101 },
+      { name: "Example game", executablePath: "C:\\Preview\\ExampleGame.exe", pid: 100 },
+      { name: "Example editor", executablePath: "C:\\Preview\\ExampleEditor.exe", pid: 101 },
+      { name: "Example launcher", executablePath: "C:\\Preview\\Launcher\\ExampleLauncher.exe", pid: 102 },
     ];
   },
   /** Opens the native executable picker; cancellation resolves to null. */
   async pickExecutable(): Promise<Pick<RunningApp, "name" | "executablePath"> | null> {
     if (!isPreview) return invoke("pick_executable");
-    return { name: "Example game (preview)", executablePath: "C:\\Preview\\ExampleGame.exe" };
+    return { name: "Example game", executablePath: "C:\\Preview\\ExampleGame.exe" };
+  },
+  /** Returns PNG data URLs aligned with `paths`; null marks files without a readable icon. */
+  async executableIcons(paths: string[]): Promise<(string | null)[]> {
+    if (!isPreview) return invoke("executable_icons", { paths });
+    return paths.map(() => null);
   },
   /** Subscribes to snapshots and returns the cleanup function once listening starts. */
   async subscribe(callback: (state: AppState) => void): Promise<() => void> {

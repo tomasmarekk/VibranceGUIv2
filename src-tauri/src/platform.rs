@@ -5,9 +5,13 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
+mod executable;
+#[cfg(windows)]
 mod vendor;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+pub(crate) use executable::{executable_description, executable_icon_png};
 #[cfg(windows)]
 pub(crate) use windows::{NativeController, display_modes, foreground_app, running_apps};
 

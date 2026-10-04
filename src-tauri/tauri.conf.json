@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "VibranceGUIv2",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "identifier": "com.tomasmarekk.vibranceguiv2",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -10,7 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{"label":"main","title":"VibranceGUI v2","width":980,"height":820,"minWidth":760,"minHeight":650,"visible":false,"center":true,"theme":"Dark","backgroundColor":"#101318"}],
+    "windows": [{"label":"main","title":"VibranceGUI v2","width":900,"height":800,"minWidth":760,"minHeight":620,"visible":false,"center":true,"decorations":false,"shadow":true,"theme":"Dark","backgroundColor":"#0f0f11"}],
     "security": {"csp":"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; font-src 'self' data:; connect-src ipc: http://ipc.localhost"}
   },
   "bundle": {
