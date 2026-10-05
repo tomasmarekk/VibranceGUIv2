@@ -31,6 +31,7 @@ let previewState: AppState = {
   ],
 };
 const subscribers = new Set<(state: AppState) => void>();
+const previewImages = new Map<string, string>();
 
 function previewSnapshot(): AppState {
   return structuredClone(previewState);
@@ -99,6 +100,21 @@ export const api = {
   async executableIcons(paths: string[]): Promise<(string | null)[]> {
     if (!isPreview) return invoke("executable_icons", { paths });
     return paths.map(() => null);
+  },
+  /** Reads the program's stored preview screenshot as a data URL, or null. */
+  async referenceImage(profileId: string): Promise<string | null> {
+    if (!isPreview) return invoke("reference_image", { profileId });
+    return previewImages.get(profileId) ?? null;
+  },
+  /** Stores a PNG, JPEG, WebP or BMP data URL as the program's preview screenshot. */
+  async saveReferenceImage(profileId: string, image: string): Promise<void> {
+    if (!isPreview) return invoke("save_reference_image", { profileId, image });
+    previewImages.set(profileId, image);
+  },
+  /** Removes the program's preview screenshot. */
+  async deleteReferenceImage(profileId: string): Promise<void> {
+    if (!isPreview) return invoke("delete_reference_image", { profileId });
+    previewImages.delete(profileId);
   },
   /** Subscribes to snapshots and returns the cleanup function once listening starts. */
   async subscribe(callback: (state: AppState) => void): Promise<() => void> {

@@ -7,11 +7,15 @@ use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 mod executable;
 #[cfg(windows)]
+mod overlay;
+#[cfg(windows)]
 mod vendor;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub(crate) use executable::{executable_description, executable_icon_png};
+#[cfg(windows)]
+pub(crate) use overlay::ColorOverlay;
 #[cfg(windows)]
 pub(crate) use windows::{NativeController, display_modes, foreground_app, running_apps};
 
@@ -84,31 +88,76 @@ pub(crate) enum PlatformError {
 
 type GammaRamp = [[u16; 256]; 3];
 
-fn validate_adjustments(vibrance: f64, brightness: f64, gamma: f64) -> Result<(), PlatformError> {
-    if !vibrance.is_finite() || !(0.0..=100.0).contains(&vibrance) {
+/// One display's requested color state in driver-independent units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Adjustment {
+    pub vibrance: f64,
+    pub brightness: f64,
+    pub gamma: f64,
+    /// Black-equalizer lift, 0–100; the desktop always uses zero.
+    pub shadow_lift: f64,
+    /// How far from black the lift reaches, 0–100.
+    pub shadow_range: f64,
+}
+
+impl Adjustment {
+    /// True when the gamma ramp can stay at the captured calibration.
+    pub(crate) fn tone_is_neutral(&self) -> bool {
+        self.brightness == 50.0 && self.gamma == 1.0 && self.shadow_lift == 0.0
+    }
+}
+
+fn validate_adjustments(adjustment: &Adjustment) -> Result<(), PlatformError> {
+    let in_range = |value: f64, range: std::ops::RangeInclusive<f64>| {
+        value.is_finite() && range.contains(&value)
+    };
+    if !in_range(adjustment.vibrance, 0.0..=100.0) {
         return Err(PlatformError::InvalidValue(
             "digital vibrance (expected 0–100)",
         ));
     }
-    if !brightness.is_finite() || !(0.0..=100.0).contains(&brightness) {
+    if !in_range(adjustment.brightness, 0.0..=100.0) {
         return Err(PlatformError::InvalidValue("brightness (expected 0–100)"));
     }
-    if !gamma.is_finite() || !(0.5..=3.0).contains(&gamma) {
+    if !in_range(adjustment.gamma, 0.5..=3.0) {
         return Err(PlatformError::InvalidValue("gamma (expected 0.5–3.0)"));
+    }
+    if !in_range(adjustment.shadow_lift, 0.0..=100.0)
+        || !in_range(adjustment.shadow_range, 0.0..=100.0)
+    {
+        return Err(PlatformError::InvalidValue(
+            "black equalizer (expected 0–100)",
+        ));
     }
     Ok(())
 }
 
-fn compose_gamma(baseline: &GammaRamp, brightness: f64, gamma: f64) -> GammaRamp {
-    if brightness == 50.0 && gamma == 1.0 {
+/// Black-equalizer curve on a 0–1 tone: lifts dark tones most around a third of its
+/// reach, keeps pure black and everything beyond the reach unchanged, and never
+/// reverses tone order. `src/colorMatch.ts` mirrors it for the preview.
+pub(crate) fn black_lift(value: f64, strength: f64, range: f64) -> f64 {
+    let reach = 0.1 + 0.5 * range / 100.0;
+    if strength <= 0.0 || value >= reach {
+        return value;
+    }
+    let remaining = 1.0 - value / reach;
+    // The slope is 1 + k(1 - u)(1 - 3u) with u = value / reach; its minimum over the
+    // reach is 1 - k/3, so a factor of at most 3 keeps the curve monotonic.
+    value + 3.0 * strength / 100.0 * value * remaining * remaining
+}
+
+fn compose_gamma(baseline: &GammaRamp, adjustment: &Adjustment) -> GammaRamp {
+    if adjustment.tone_is_neutral() {
         return *baseline;
     }
-    let gain = 2.0_f64.powf((brightness - 50.0) / 50.0);
+    let gain = 2.0_f64.powf((adjustment.brightness - 50.0) / 50.0);
     baseline.map(|channel| {
         channel.map(|sample| {
-            let corrected = (f64::from(sample) / 65535.0).powf(1.0 / gamma) * gain;
+            let corrected =
+                ((f64::from(sample) / 65535.0).powf(1.0 / adjustment.gamma) * gain).clamp(0.0, 1.0);
+            let lifted = black_lift(corrected, adjustment.shadow_lift, adjustment.shadow_range);
             // GDI requires unsigned 16-bit samples; clamp before the deliberate rounding cast.
-            (corrected.clamp(0.0, 1.0) * 65535.0).round() as u16
+            (lifted.clamp(0.0, 1.0) * 65535.0).round() as u16
         })
     })
 }
@@ -136,21 +185,32 @@ mod tests {
         })
     }
 
-    #[test]
-    fn neutral_preserves_each_calibrated_channel_exactly() {
-        let ramp = calibrated_ramp();
-        assert_eq!(compose_gamma(&ramp, 50.0, 1.0), ramp);
+    fn tone(brightness: f64, gamma: f64, shadow_lift: f64) -> Adjustment {
+        Adjustment {
+            vibrance: 50.0,
+            brightness,
+            gamma,
+            shadow_lift,
+            shadow_range: 50.0,
+        }
     }
 
     #[test]
-    fn brightness_and_gamma_are_monotonic_and_retain_black() {
+    fn neutral_preserves_each_calibrated_channel_exactly() {
+        let ramp = calibrated_ramp();
+        assert_eq!(compose_gamma(&ramp, &tone(50.0, 1.0, 0.0)), ramp);
+    }
+
+    #[test]
+    fn tone_controls_are_monotonic_and_retain_black() {
         let ramp = calibrated_ramp();
         for brightness in [0.0, 25.0, 50.0, 100.0] {
             for gamma in [0.5, 1.0, 2.2, 3.0] {
-                let adjusted = compose_gamma(&ramp, brightness, gamma);
-                for channel in adjusted {
-                    assert_eq!(channel[0], 0);
-                    assert!(channel.windows(2).all(|pair| pair[0] <= pair[1]));
+                for lift in [0.0, 40.0, 100.0] {
+                    for channel in compose_gamma(&ramp, &tone(brightness, gamma, lift)) {
+                        assert_eq!(channel[0], 0);
+                        assert!(channel.windows(2).all(|pair| pair[0] <= pair[1]));
+                    }
                 }
             }
         }
@@ -159,10 +219,34 @@ mod tests {
     #[test]
     fn gamma_above_one_lifts_midtones_and_brightness_is_independent() {
         let ramp = calibrated_ramp();
-        assert!(compose_gamma(&ramp, 50.0, 2.0)[0][128] > ramp[0][128]);
-        assert!(compose_gamma(&ramp, 50.0, 0.5)[0][128] < ramp[0][128]);
-        assert!(compose_gamma(&ramp, 25.0, 1.0)[0][128] < ramp[0][128]);
-        assert!(compose_gamma(&ramp, 75.0, 1.0)[0][128] > ramp[0][128]);
+        assert!(compose_gamma(&ramp, &tone(50.0, 2.0, 0.0))[0][128] > ramp[0][128]);
+        assert!(compose_gamma(&ramp, &tone(50.0, 0.5, 0.0))[0][128] < ramp[0][128]);
+        assert!(compose_gamma(&ramp, &tone(25.0, 1.0, 0.0))[0][128] < ramp[0][128]);
+        assert!(compose_gamma(&ramp, &tone(75.0, 1.0, 0.0))[0][128] > ramp[0][128]);
+    }
+
+    #[test]
+    fn black_equalizer_lifts_shadows_but_leaves_highlights() {
+        let ramp = calibrated_ramp();
+        let lifted = compose_gamma(&ramp, &tone(50.0, 1.0, 80.0));
+        assert!(
+            lifted[0][30] > ramp[0][30] + 3000,
+            "dark tones rise visibly"
+        );
+        assert_eq!(lifted[0][200], ramp[0][200], "bright tones are untouched");
+        assert_eq!(
+            black_lift(0.2, 80.0, 0.0),
+            0.2,
+            "a short reach ends before 0.2"
+        );
+        assert!(
+            black_lift(0.2, 80.0, 100.0) > 0.2,
+            "a long reach includes it"
+        );
+        for step in 0..1000 {
+            let value = f64::from(step) / 1000.0;
+            assert!(black_lift(value + 0.001, 100.0, 50.0) >= black_lift(value, 100.0, 50.0));
+        }
     }
 
     #[test]
@@ -177,13 +261,38 @@ mod tests {
 
     #[test]
     fn invalid_inputs_are_rejected_before_touching_drivers() {
+        let neutral = tone(50.0, 1.0, 0.0);
         for value in [f64::NAN, f64::INFINITY, -1.0, 101.0] {
-            assert!(validate_adjustments(value, 50.0, 1.0).is_err());
-            assert!(validate_adjustments(50.0, value, 1.0).is_err());
+            for adjustment in [
+                Adjustment {
+                    vibrance: value,
+                    ..neutral
+                },
+                Adjustment {
+                    brightness: value,
+                    ..neutral
+                },
+                Adjustment {
+                    shadow_lift: value,
+                    ..neutral
+                },
+                Adjustment {
+                    shadow_range: value,
+                    ..neutral
+                },
+            ] {
+                assert!(validate_adjustments(&adjustment).is_err());
+            }
         }
         for value in [f64::NAN, f64::INFINITY, 0.49, 3.01] {
-            assert!(validate_adjustments(50.0, 50.0, value).is_err());
+            assert!(
+                validate_adjustments(&Adjustment {
+                    gamma: value,
+                    ..neutral
+                })
+                .is_err()
+            );
         }
-        assert!(validate_adjustments(0.0, 100.0, 3.0).is_ok());
+        assert!(validate_adjustments(&tone(100.0, 3.0, 100.0)).is_ok());
     }
 }

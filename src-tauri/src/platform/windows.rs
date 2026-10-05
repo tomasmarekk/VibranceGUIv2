@@ -36,8 +36,8 @@ use windows_sys::Win32::{
 };
 
 use super::{
-    DisplayInfo, DisplayMode, ForegroundApp, GammaRamp, PlatformError, RunningApp, compose_gamma,
-    validate_adjustments,
+    Adjustment, DisplayInfo, DisplayMode, ForegroundApp, GammaRamp, PlatformError, RunningApp,
+    compose_gamma, validate_adjustments,
     vendor::{Vendors, VibranceTarget},
 };
 
@@ -131,12 +131,12 @@ impl NativeController {
     pub(crate) fn apply(
         &mut self,
         display_id: &str,
-        vibrance: f64,
-        brightness: f64,
-        gamma: f64,
+        adjustment: &Adjustment,
         resolution: Option<&DisplayMode>,
     ) -> Result<(), PlatformError> {
-        validate_adjustments(vibrance, brightness, gamma)?;
+        validate_adjustments(adjustment)?;
+        let vibrance = adjustment.vibrance;
+        let tone_neutral = adjustment.tone_is_neutral();
         if !self.displays.iter().any(|display| display.id == display_id) {
             return Err(PlatformError::DisplayMissing(display_id.to_owned()));
         }
@@ -177,18 +177,18 @@ impl NativeController {
         }
 
         match &snapshot.gamma {
-            Some(baseline) if brightness != 50.0 || gamma != 1.0 || snapshot.gamma_changed => {
-                let ramp = compose_gamma(baseline, brightness, gamma);
+            Some(baseline) if !tone_neutral || snapshot.gamma_changed => {
+                let ramp = compose_gamma(baseline, adjustment);
                 // A driver can reject verification after changing its LUT; leave
                 // restoration pending until the complete operation succeeds.
                 snapshot.gamma_changed = true;
                 match write_gamma(display_id, &ramp) {
-                    Ok(()) => snapshot.gamma_changed = brightness != 50.0 || gamma != 1.0,
+                    Ok(()) => snapshot.gamma_changed = !tone_neutral,
                     Err(error) => errors.push(error.to_string()),
                 }
             }
-            None if brightness != 50.0 || gamma != 1.0 => errors.push(format!(
-                "brightness and gamma are not supported on {display_id}"
+            None if !tone_neutral => errors.push(format!(
+                "brightness, gamma and black equalizer are not supported on {display_id}"
             )),
             _ => {}
         }
@@ -758,7 +758,14 @@ mod tests {
         let original_gamma = read_gamma(&display.id).unwrap();
         let original_mode = public_mode(&current_mode(&display.id).unwrap());
         let percent = original_vibrance.slightly_adjusted_percent();
-        let applied = controller.apply(&display.id, percent, 51.0, 1.02, None);
+        let adjustment = Adjustment {
+            vibrance: percent,
+            brightness: 51.0,
+            gamma: 1.02,
+            shadow_lift: 0.0,
+            shadow_range: 50.0,
+        };
+        let applied = controller.apply(&display.id, &adjustment, None);
         let active_vibrance = controller.vendors.capture(&display.id);
         let active_gamma = read_gamma(&display.id);
         // Always restore before assertions, including the driver-rejection path.

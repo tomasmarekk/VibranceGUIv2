@@ -1,8 +1,10 @@
 //! VibranceGUI v2's Windows desktop lifecycle and Rust command boundary.
 //! Driver access runs on a single observer thread, independently of the webview.
 
+mod color_match;
 mod observer;
 mod platform;
+mod references;
 mod settings;
 
 use anyhow::Context;
@@ -12,6 +14,7 @@ use settings::{ColorSettings, ConfigStore, GlobalSettings, Profile};
 use std::{
     fs,
     io::Write,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 use tauri::{Emitter, Manager};
@@ -281,6 +284,60 @@ async fn executable_icons(paths: Vec<String>) -> Result<Vec<Option<String>>, Str
     .map_err(|error| error.to_string())
 }
 
+fn references_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join("references"))
+        .map_err(|error| error.to_string())
+}
+
+/// Runs a reference-image operation off the IPC thread; images can be megabytes.
+async fn with_references<T: Send + 'static>(
+    app: &tauri::AppHandle,
+    operation: impl FnOnce(&std::path::Path) -> Result<T, references::ReferenceError> + Send + 'static,
+) -> Result<T, String> {
+    let directory = references_directory(app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        operation(&directory).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Returns the profile's preview screenshot as a data URL, if one was stored.
+#[tauri::command]
+async fn reference_image(
+    profile_id: String,
+    app: tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    with_references(&app, move |directory| {
+        references::load(directory, &profile_id)
+    })
+    .await
+}
+
+/// Stores a PNG, JPEG, WebP or BMP data URL as the profile's preview screenshot.
+#[tauri::command]
+async fn save_reference_image(
+    profile_id: String,
+    image: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    with_references(&app, move |directory| {
+        references::save(directory, &profile_id, &image)
+    })
+    .await
+}
+
+/// Removes the profile's preview screenshot.
+#[tauri::command]
+async fn delete_reference_image(profile_id: String, app: tauri::AppHandle) -> Result<(), String> {
+    with_references(&app, move |directory| {
+        references::delete(directory, &profile_id)
+    })
+    .await
+}
+
 fn show_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         for result in [window.show(), window.unminimize(), window.set_focus()] {
@@ -377,7 +434,10 @@ pub fn run() -> anyhow::Result<()> {
             set_enabled,
             list_running_apps,
             pick_executable,
-            executable_icons
+            executable_icons,
+            reference_image,
+            save_reference_image,
+            delete_reference_image
         ])
         .setup(|app| {
             let directory = app.path().app_config_dir()?;
@@ -410,6 +470,13 @@ pub fn run() -> anyhow::Result<()> {
                 }
             };
             config.settings.autostart = app.autolaunch().is_enabled()?;
+            // An unreadable settings file looks like "no profiles"; keep every image then.
+            if error.is_none() {
+                references::remove_orphans(
+                    &directory.join("references"),
+                    config.profiles.iter().map(|profile| profile.id.as_str()),
+                );
+            }
             let snapshot = Arc::new(Mutex::new(AppState::new(config, error)));
             if std::env::args().any(|arg| arg == "--paused") {
                 snapshot

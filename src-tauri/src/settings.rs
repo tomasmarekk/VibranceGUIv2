@@ -57,6 +57,99 @@ impl ColorSettings {
     }
 }
 
+fn validate_range(name: &str, value: f64, minimum: f64, maximum: f64) -> Result<(), SettingsError> {
+    if value.is_finite() && (minimum..=maximum).contains(&value) {
+        Ok(())
+    } else {
+        Err(SettingsError::Invalid(format!(
+            "{name} must be between {minimum} and {maximum}"
+        )))
+    }
+}
+
+/// Program-only shadow lift, applied through the same gamma ramp as brightness and gamma.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct BlackEqualizer {
+    /// Lift amount, 0–100; zero leaves the ramp to brightness and gamma.
+    pub strength: f64,
+    /// How far from black the lift reaches, 0–100.
+    pub range: f64,
+}
+
+impl Default for BlackEqualizer {
+    fn default() -> Self {
+        Self {
+            strength: 0.0,
+            range: 50.0,
+        }
+    }
+}
+
+impl BlackEqualizer {
+    pub(crate) fn validate(self) -> Result<(), SettingsError> {
+        validate_range("black equalizer strength", self.strength, 0.0, 100.0)?;
+        validate_range("black equalizer range", self.range, 0.0, 100.0)
+    }
+}
+
+/// Most color rules one profile may hold; the overlay shader has one slot per rule.
+pub(crate) const MAX_COLOR_RULES: usize = 4;
+
+/// Moves screen pixels close to `source` toward `target`; drawn by the color overlay.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ColorRule {
+    pub id: String,
+    pub enabled: bool,
+    /// Color to find, `#RRGGBB`.
+    pub source: String,
+    /// Color matched pixels move toward, `#RRGGBB`.
+    pub target: String,
+    /// How different a pixel may be and still match, 0–100.
+    pub tolerance: f64,
+    /// Share of the change that is shown, 0–100.
+    pub strength: f64,
+    /// Chroma change of matched pixels, −100–100.
+    pub saturation: f64,
+    /// Lightness change of matched pixels, −100–100.
+    pub brightness: f64,
+}
+
+impl ColorRule {
+    pub(crate) fn validate(&self) -> Result<(), SettingsError> {
+        if self.id.is_empty() || self.id.len() > 64 || self.id.chars().any(char::is_control) {
+            return Err(SettingsError::Invalid(
+                "color rule ID is empty or invalid".into(),
+            ));
+        }
+        if parse_hex_color(&self.source).is_none() || parse_hex_color(&self.target).is_none() {
+            return Err(SettingsError::Invalid(
+                "color rules need colors written as #RRGGBB".into(),
+            ));
+        }
+        validate_range("color match range", self.tolerance, 0.0, 100.0)?;
+        validate_range("color strength", self.strength, 0.0, 100.0)?;
+        validate_range("color saturation", self.saturation, -100.0, 100.0)?;
+        validate_range("color brightness", self.brightness, -100.0, 100.0)
+    }
+
+    /// True when the rule would draw anything on screen.
+    pub(crate) fn is_active(&self) -> bool {
+        self.enabled && self.strength > 0.0
+    }
+}
+
+/// Parses `#RRGGBB` (case-insensitive) into sRGB bytes.
+pub(crate) fn parse_hex_color(value: &str) -> Option<[u8; 3]> {
+    let digits = value.strip_prefix('#')?;
+    if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |index: usize| u8::from_str_radix(&digits[index..index + 2], 16).ok();
+    Some([channel(0)?, channel(2)?, channel(4)?])
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub(crate) struct GlobalSettings {
@@ -75,6 +168,11 @@ pub(crate) struct Profile {
     pub match_by_path: bool,
     pub color: ColorSettings,
     pub resolution: Option<DisplayMode>,
+    // Both default so settings saved before 2.2 load unchanged.
+    #[serde(default)]
+    pub black_equalizer: BlackEqualizer,
+    #[serde(default)]
+    pub color_rules: Vec<ColorRule>,
 }
 
 impl Profile {
@@ -94,6 +192,19 @@ impl Profile {
         }
         validate_executable(&self.executable_path)?;
         self.color.validate()?;
+        self.black_equalizer.validate()?;
+        if self.color_rules.len() > MAX_COLOR_RULES {
+            return Err(SettingsError::Invalid(format!(
+                "a program can have at most {MAX_COLOR_RULES} color rules"
+            )));
+        }
+        let mut rule_ids = HashSet::new();
+        for rule in &self.color_rules {
+            rule.validate()?;
+            if !rule_ids.insert(&rule.id) {
+                return Err(SettingsError::Invalid("duplicate color rule".into()));
+            }
+        }
         if let Some(mode) = &self.resolution
             && (mode.width < 320
                 || mode.width > 16384
@@ -278,7 +389,66 @@ mod tests {
             match_by_path: false,
             color: ColorSettings::default(),
             resolution: None,
+            black_equalizer: BlackEqualizer::default(),
+            color_rules: Vec::new(),
         }
+    }
+
+    fn rule(id: &str) -> ColorRule {
+        ColorRule {
+            id: id.into(),
+            enabled: true,
+            source: "#FEFE39".into(),
+            target: "#ff3bd4".into(),
+            tolerance: 30.0,
+            strength: 100.0,
+            saturation: 0.0,
+            brightness: 0.0,
+        }
+    }
+
+    #[test]
+    fn hex_colors_parse_only_in_rrggbb_form() {
+        assert_eq!(parse_hex_color("#FEFE39"), Some([254, 254, 57]));
+        assert_eq!(parse_hex_color("#fefe39"), Some([254, 254, 57]));
+        for invalid in ["FEFE39", "#FEF", "#FEFE3", "#FEFE39FF", "#GGGGGG", ""] {
+            assert_eq!(parse_hex_color(invalid), None, "{invalid}");
+        }
+    }
+
+    #[test]
+    fn program_graphics_settings_are_bounded() {
+        let mut game = profile(r"C:\game.exe");
+        game.color_rules = vec![rule("a"), rule("b")];
+        game.black_equalizer.strength = 100.0;
+        assert!(game.validate().is_ok());
+
+        game.color_rules[1].id = "a".into();
+        assert!(game.validate().is_err(), "duplicate rule IDs");
+        game.color_rules[1].id = "b".into();
+        game.color_rules[1].source = "yellow".into();
+        assert!(game.validate().is_err(), "named colors");
+        game.color_rules[1] = ColorRule {
+            saturation: -100.1,
+            ..rule("b")
+        };
+        assert!(game.validate().is_err(), "saturation range");
+        game.color_rules = (0..=MAX_COLOR_RULES)
+            .map(|index| rule(&index.to_string()))
+            .collect();
+        assert!(game.validate().is_err(), "too many rules");
+        game.color_rules.clear();
+        game.black_equalizer.range = f64::NAN;
+        assert!(game.validate().is_err(), "non-finite range");
+    }
+
+    #[test]
+    fn profiles_saved_before_graphics_settings_still_load() {
+        let saved = r#"{"id":"game","name":"Game","executablePath":"C:\\game.exe","matchByPath":false,"color":{"vibrance":80.0,"brightness":50.0,"gamma":1.0},"resolution":null}"#;
+        let loaded: Profile = serde_json::from_str(saved).unwrap();
+        assert_eq!(loaded.black_equalizer, BlackEqualizer::default());
+        assert!(loaded.color_rules.is_empty());
+        assert!(loaded.validate().is_ok());
     }
 
     #[test]

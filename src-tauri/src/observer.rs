@@ -2,8 +2,10 @@
 //! A joined worker owns all driver handles so shutdown can restore captured state.
 
 use crate::{
-    platform::{self, DisplayInfo, DisplayMode, ForegroundApp, NativeController},
-    settings::{ColorSettings, Config, GlobalSettings, Profile},
+    platform::{
+        self, Adjustment, ColorOverlay, DisplayInfo, DisplayMode, ForegroundApp, NativeController,
+    },
+    settings::{BlackEqualizer, ColorRule, ColorSettings, Config, GlobalSettings, Profile},
 };
 use serde::Serialize;
 use std::{
@@ -69,19 +71,45 @@ pub(crate) type SharedState = Arc<Mutex<AppState>>;
 #[derive(Clone, Debug, PartialEq)]
 struct DisplayPlan {
     id: String,
-    color: ColorSettings,
+    adjustment: Adjustment,
     resolution: Option<DisplayMode>,
 }
 
-fn plan(
-    config: &Config,
-    displays: &[DisplayInfo],
-    foreground: Option<&ForegroundApp>,
-) -> (Option<String>, Vec<DisplayPlan>) {
+/// Color rules to draw over the display that shows the matched program.
+#[derive(Clone, Debug, PartialEq)]
+struct OverlayPlan {
+    display_id: String,
+    rules: Vec<ColorRule>,
+}
+
+#[derive(Debug)]
+struct Plan {
+    active_profile: Option<String>,
+    displays: Vec<DisplayPlan>,
+    overlay: Option<OverlayPlan>,
+}
+
+fn adjustment(color: ColorSettings, black: BlackEqualizer) -> Adjustment {
+    Adjustment {
+        vibrance: color.vibrance,
+        brightness: color.brightness,
+        gamma: color.gamma,
+        shadow_lift: black.strength,
+        shadow_range: black.range,
+    }
+}
+
+fn plan(config: &Config, displays: &[DisplayInfo], foreground: Option<&ForegroundApp>) -> Plan {
     let profile = foreground.and_then(|app| config.matching_profile(&app.exe_name, &app.exe_path));
+    let in_scope = |display: &&DisplayInfo| !config.settings.primary_only || display.primary;
+    // The black equalizer belongs to program profiles; the desktop keeps a plain ramp.
+    let target = profile.map_or_else(
+        || adjustment(config.desktop, BlackEqualizer::default()),
+        |profile| adjustment(profile.color, profile.black_equalizer),
+    );
     let plans = displays
         .iter()
-        .filter(|display| !config.settings.primary_only || display.primary)
+        .filter(in_scope)
         .map(|display| {
             let resolution = profile.and_then(|profile| profile.resolution).filter(|_| {
                 !config.settings.never_change_resolution
@@ -89,12 +117,49 @@ fn plan(
             });
             DisplayPlan {
                 id: display.id.clone(),
-                color: profile.map_or(config.desktop, |profile| profile.color),
+                adjustment: target,
                 resolution,
             }
         })
         .collect();
-    (profile.map(|profile| profile.id.clone()), plans)
+    let overlay = profile.zip(foreground).and_then(|(profile, app)| {
+        let rules: Vec<_> = profile
+            .color_rules
+            .iter()
+            .filter(|rule| rule.is_active())
+            .cloned()
+            .collect();
+        let shown = displays
+            .iter()
+            .filter(in_scope)
+            .any(|display| display.id == app.display_id);
+        (shown && !rules.is_empty()).then(|| OverlayPlan {
+            display_id: app.display_id.clone(),
+            rules,
+        })
+    });
+    Plan {
+        active_profile: profile.map(|profile| profile.id.clone()),
+        displays: plans,
+        overlay,
+    }
+}
+
+/// Starts, retargets, updates or stops the color overlay to match the plan.
+fn sync_overlay(current: &mut Option<ColorOverlay>, wanted: Option<&OverlayPlan>) {
+    match wanted {
+        None => *current = None,
+        Some(wanted) => match current {
+            Some(overlay) if overlay.display_id() == wanted.display_id => {
+                overlay.set_rules(&wanted.rules);
+            }
+            _ => {
+                // Drop the old overlay first so two windows never cover the screen.
+                *current = None;
+                *current = Some(ColorOverlay::start(&wanted.display_id, &wanted.rules));
+            }
+        },
+    }
 }
 
 fn restore_changed_targets<E>(
@@ -193,6 +258,15 @@ fn observe(state: SharedState, app: tauri::AppHandle, stop: mpsc::Receiver<()>) 
     let mut was_enabled = false;
     let mut restore_pending = false;
     let mut has_applied = false;
+    let mut overlay: Option<ColorOverlay> = None;
+    // Display errors are retried and carried between iterations; overlay errors are
+    // re-read from the overlay each time, so they are kept out of this carry-over.
+    let mut display_message = state
+        .lock()
+        .expect("application state mutex poisoned")
+        .status
+        .message
+        .clone();
     loop {
         if last_refresh.elapsed() >= Duration::from_secs(5) {
             if let Err(error) = native.refresh_displays() {
@@ -268,11 +342,13 @@ fn observe(state: SharedState, app: tauri::AppHandle, stop: mpsc::Receiver<()>) 
         let mut active_id = None;
         if enabled {
             let foreground = platform::foreground_app();
-            let (id, current_plan) = plan(&config, &native.displays(), foreground.as_ref());
-            active_id = id;
+            let current = plan(&config, &native.displays(), foreground.as_ref());
+            active_id = current.active_profile;
+            sync_overlay(&mut overlay, current.overlay.as_ref());
+            let current_plan = current.displays;
             let changed = last_plan.as_ref() != Some(&current_plan) || !was_enabled;
             if changed
-                || ((previous_status.message.is_some() || scope_restore_pending)
+                || ((display_message.is_some() || scope_restore_pending)
                     && last_attempt.elapsed() >= Duration::from_secs(3))
             {
                 let targets: std::collections::BTreeSet<_> = current_plan
@@ -290,13 +366,9 @@ fn observe(state: SharedState, app: tauri::AppHandle, stop: mpsc::Receiver<()>) 
                     errors.push(error.to_string());
                 }
                 for target in &current_plan {
-                    if let Err(error) = native.apply(
-                        &target.id,
-                        target.color.vibrance,
-                        target.color.brightness,
-                        target.color.gamma,
-                        target.resolution.as_ref(),
-                    ) {
+                    if let Err(error) =
+                        native.apply(&target.id, &target.adjustment, target.resolution.as_ref())
+                    {
                         errors.push(error.to_string());
                     }
                 }
@@ -304,12 +376,13 @@ fn observe(state: SharedState, app: tauri::AppHandle, stop: mpsc::Receiver<()>) 
                 applied_targets = targets;
                 last_attempt = Instant::now();
                 has_applied = true;
-            } else if let Some(message) = &previous_status.message {
+            } else if let Some(message) = &display_message {
                 errors.push(message.clone());
             }
         } else if was_enabled
             || (restore_pending && last_attempt.elapsed() >= Duration::from_secs(3))
         {
+            overlay = None;
             restore_pending = match native.restore_all() {
                 Ok(()) => native.has_pending_restore(),
                 Err(error) => {
@@ -319,14 +392,15 @@ fn observe(state: SharedState, app: tauri::AppHandle, stop: mpsc::Receiver<()>) 
             };
             last_attempt = Instant::now();
             last_plan = None;
-        } else if let Some(message) = previous_status.message.clone() {
+        } else if let Some(message) = display_message.clone() {
             errors.push(message);
         }
         was_enabled = enabled;
-        let message = if errors.is_empty() {
-            None
-        } else {
-            Some(errors.join("\n"))
+        display_message = (!errors.is_empty()).then(|| errors.join("\n"));
+        let overlay_error = overlay.as_ref().and_then(ColorOverlay::error);
+        let message = match (display_message.clone(), overlay_error) {
+            (Some(display), Some(overlay)) => Some(format!("{display}\n{overlay}")),
+            (display, overlay) => display.or(overlay),
         };
         let mut snapshot = state.lock().expect("application state mutex poisoned");
         snapshot.status.active_profile_id = active_id;
@@ -341,6 +415,7 @@ fn observe(state: SharedState, app: tauri::AppHandle, stop: mpsc::Receiver<()>) 
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
+    drop(overlay);
     if let Err(error) = native.restore_all() {
         tracing::error!(%error, "failed to restore original display state on exit");
     }
@@ -422,6 +497,23 @@ mod tests {
                 height: 720,
                 refresh_rate: 60,
             }),
+            black_equalizer: BlackEqualizer {
+                strength: 40.0,
+                range: 60.0,
+            },
+            color_rules: Vec::new(),
+        }
+    }
+    fn outline_rule(enabled: bool) -> ColorRule {
+        ColorRule {
+            id: "outline".into(),
+            enabled,
+            source: "#FEFE39".into(),
+            target: "#FF00FF".into(),
+            tolerance: 30.0,
+            strength: 100.0,
+            saturation: 0.0,
+            brightness: 0.0,
         }
     }
     fn foreground(id: &str, name: &str) -> ForegroundApp {
@@ -439,12 +531,16 @@ mod tests {
             profiles: vec![game()],
             ..Config::default()
         };
-        let (_, plans) = plan(
+        let plans = plan(
             &config,
             &[display("one", true), display("two", false)],
             Some(&foreground("two", "game")),
+        )
+        .displays;
+        assert_eq!(
+            plans[0].adjustment,
+            adjustment(game().color, game().black_equalizer)
         );
-        assert_eq!(plans[0].color, game().color);
         assert_eq!(plans[0].resolution, None);
         assert_eq!(plans[1].resolution, game().resolution);
     }
@@ -455,17 +551,16 @@ mod tests {
             profiles: vec![game()],
             ..Config::default()
         };
-        let (active, plans) = plan(
+        let current = plan(
             &config,
             &[display("one", true), display("two", false)],
             Some(&foreground("one", "explorer")),
         );
-        assert_eq!(active, None);
-        assert!(
-            plans
-                .iter()
-                .all(|p| p.color == config.desktop && p.resolution.is_none())
-        );
+        assert_eq!(current.active_profile, None);
+        assert_eq!(current.overlay, None);
+        assert!(current.displays.iter().all(|p| p.adjustment
+            == adjustment(config.desktop, BlackEqualizer::default())
+            && p.resolution.is_none()));
     }
 
     #[test]
@@ -478,11 +573,12 @@ mod tests {
             profiles: vec![game()],
             ..Config::default()
         };
-        let (_, plans) = plan(
+        let plans = plan(
             &config,
             &[display("one", true), display("two", false)],
             Some(&foreground("two", "game")),
-        );
+        )
+        .displays;
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].id, "one");
         assert_eq!(plans[0].resolution, None);
@@ -496,18 +592,20 @@ mod tests {
             profiles: vec![profile],
             ..Config::default()
         };
-        let (_, plans) = plan(
+        let plans = plan(
             &config,
             &[display("one", true)],
             Some(&foreground("one", "game")),
-        );
+        )
+        .displays;
         assert!(plans[0].resolution.is_some());
         config.settings.never_change_resolution = true;
-        let (_, plans) = plan(
+        let plans = plan(
             &config,
             &[display("one", true)],
             Some(&foreground("one", "game")),
-        );
+        )
+        .displays;
         assert!(plans[0].resolution.is_none());
     }
 
@@ -520,7 +618,69 @@ mod tests {
             },
             ..Config::default()
         };
-        let (_, plans) = plan(&config, &[display("one", true)], None);
-        assert_eq!(plans[0].color.brightness, 72.0);
+        let plans = plan(&config, &[display("one", true)], None).displays;
+        assert_eq!(plans[0].adjustment.brightness, 72.0);
+        assert_eq!(plans[0].adjustment.shadow_lift, 0.0);
+    }
+
+    #[test]
+    fn color_rules_overlay_only_the_game_display_while_it_is_in_scope() {
+        let mut profile = game();
+        profile.color_rules = vec![outline_rule(true), outline_rule(false)];
+        let mut config = Config {
+            profiles: vec![profile],
+            ..Config::default()
+        };
+        let displays = [display("one", true), display("two", false)];
+        let overlay = plan(&config, &displays, Some(&foreground("two", "game"))).overlay;
+        assert_eq!(
+            overlay,
+            Some(OverlayPlan {
+                display_id: "two".into(),
+                rules: vec![outline_rule(true)],
+            })
+        );
+        config.settings.primary_only = true;
+        assert_eq!(
+            plan(&config, &displays, Some(&foreground("two", "game"))).overlay,
+            None,
+            "the game's display is excluded"
+        );
+        config.profiles[0].color_rules = vec![outline_rule(false)];
+        config.settings.primary_only = false;
+        assert_eq!(
+            plan(&config, &displays, Some(&foreground("one", "game"))).overlay,
+            None,
+            "only disabled rules"
+        );
+    }
+
+    #[test]
+    #[ignore = "opens the color overlay over the current foreground window; requires an interactive desktop"]
+    fn foreground_program_with_rules_opens_and_closes_the_overlay() {
+        use windows::{Win32::UI::WindowsAndMessaging::FindWindowW, core::w};
+        let overlay_window = || {
+            // SAFETY: both arguments are static NUL-terminated strings.
+            unsafe { FindWindowW(w!("VibranceGuiColorOverlay"), None) }.is_ok()
+        };
+        let native = NativeController::new().unwrap();
+        let foreground = platform::foreground_app().expect("a focused window");
+        let mut profile = game();
+        profile.executable_path = foreground.exe_path.clone();
+        profile.color_rules = vec![outline_rule(true)];
+        let config = Config {
+            profiles: vec![profile],
+            ..Config::default()
+        };
+        let mut overlay = None;
+        let wanted = plan(&config, &native.displays(), Some(&foreground)).overlay;
+        assert!(wanted.is_some(), "the focused program has an active rule");
+        sync_overlay(&mut overlay, wanted.as_ref());
+        thread::sleep(Duration::from_secs(2));
+        assert!(overlay_window(), "the overlay window is shown");
+        sync_overlay(&mut overlay, wanted.as_ref());
+        assert_eq!(overlay.as_ref().and_then(ColorOverlay::error), None);
+        sync_overlay(&mut overlay, None);
+        assert!(overlay.is_none() && !overlay_window(), "the overlay closes");
     }
 }

@@ -23,6 +23,17 @@ Windows 10/11 x64 and an installed display driver are required. Digital vibrance
 3. Adjust its profile, optionally select a supported resolution, and choose **Add program**. Select a program tile later to change or remove its profile.
 4. Focus that application to activate its profile; focus another application to return to the Windows colors.
 
+### Program graphics
+
+Program profiles have two extra tools that the Windows colors do not:
+
+- **Black Equalizer** brightens dark tones while leaving bright ones unchanged. **Strength** sets how much, **Range** how far into the midtones it reaches. It is applied through the same driver gamma ramp as brightness and gamma, so it works in every display mode.
+- **Color Equalizer** finds one color on screen, such as an enemy highlight, and replaces it, boosts its saturation or changes its brightness. **Match range** decides how similar a pixel must be; darker shades of the same color match too. Up to four colors per program.
+
+Add a screenshot of the game to the program's preview by pasting it (Ctrl+V), dropping a file or choosing one. Use the eyedropper to pick the color from the screenshot and compare **Before** and **After** while adjusting. The preview reproduces the gamma ramp and color matching exactly and approximates digital vibrance. Screenshots stay on your PC next to the settings.
+
+Drivers cannot change a single color, so the Color Equalizer captures the display with Windows Desktop Duplication and draws only the matching pixels in a transparent, click-through window above the game. It does not inject into or read from the game process. It needs an SDR display, works with borderless or windowed games, adds about one frame of delay to the recolored pixels only, and is hidden from screenshots and recordings. Anti-cheat rules on screen overlays differ between games; check them before using it in competitive play.
+
 The native observer checks foreground changes every 150 ms. **Primary monitor only** means the Windows primary display; otherwise profiles apply to all connected supported displays. Profiles match an executable name by default, with exact-path matching available. **Never change resolution** disables profile resolution changes. Pause or exit restores the display state captured before the app took control. Minimize hides the window to the tray; closing the window or choosing **Exit and restore display settings** in the tray menu quits the application. Autostart launches minimized.
 
 Settings and the application log are stored at `%APPDATA%\com.tomasmarekk.vibranceguiv2\settings.json` and `application.log`. Missing game executables do not delete saved profiles.
@@ -30,7 +41,7 @@ Settings and the application log are stored at `%APPDATA%\com.tomasmarekk.vibran
 Launch with `--paused` to inspect the interface and detected capabilities before applying any display settings. The tray menu or interface can then resume profiles. `--diagnostics` emits capability JSON without applying color or resolution changes; for a GUI executable, redirect its output explicitly:
 
 ```powershell
-Start-Process -FilePath .\VibranceGUIv2_2.1.0_x64-portable.exe `
+Start-Process -FilePath .\VibranceGUIv2_2.2.0_x64-portable.exe `
     -ArgumentList '--diagnostics' -Wait -WindowStyle Hidden `
     -RedirectStandardOutput .\diagnostics.json -RedirectStandardError .\diagnostics-errors.txt
 ```

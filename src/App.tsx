@@ -5,13 +5,13 @@ import { Alert, AlertDialog, Button, Card, Spinner, Toast, ToggleButton, toast }
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { ColorControls } from "./components/ColorControls";
-import { ProfileEditor } from "./components/ProfileEditor";
+import { ProgramPage } from "./components/ProgramPage";
 import { ProgramGrid } from "./components/ProgramGrid";
 import { RunningAppPicker } from "./components/RunningAppPicker";
 import { TitleBar } from "./components/TitleBar";
 import { isNeutral, samePath } from "./format";
 import { useExecutableIcons } from "./hooks/useExecutableIcons";
-import { DEFAULT_COLOR } from "./types";
+import { DEFAULT_BLACK_EQUALIZER, DEFAULT_COLOR } from "./types";
 import type { AppState, ColorSettings, Profile, RunningApp, Settings } from "./types";
 
 type Preference = keyof Pick<Settings, "autostart" | "primaryOnly" | "neverChangeResolution">;
@@ -114,7 +114,7 @@ export default function App() {
     const existing = stateRef.current?.profiles.find((profile) => samePath(profile.executablePath, app.executablePath));
     setEditor(existing
       ? { profile: existing, isNew: false }
-      : { profile: { id: crypto.randomUUID(), name: app.name, executablePath: app.executablePath, matchByPath: false, color: { ...DEFAULT_COLOR }, resolution: null }, isNew: true });
+      : { profile: { id: crypto.randomUUID(), name: app.name, executablePath: app.executablePath, matchByPath: false, color: { ...DEFAULT_COLOR }, resolution: null, blackEqualizer: { ...DEFAULT_BLACK_EQUALIZER }, colorRules: [] }, isNew: true });
   }
 
   async function addManually() {
@@ -148,7 +148,7 @@ export default function App() {
   const enabled = state?.status.enabled ?? false;
   const activeProgram = state?.profiles.find((profile) => profile.id === state.status.activeProfileId);
 
-  return <div className="app">
+  return <div className={`app ${editor ? "is-wide" : ""}`}>
     <TitleBar />
     {!state ? <main className="startup">
       {loadError ? <div className="startup__error" role="alert">
@@ -156,7 +156,16 @@ export default function App() {
         <p>{loadError}</p>
         <Button variant="primary" onPress={() => setRevision((value) => value + 1)}>Try again</Button>
       </div> : <Spinner aria-label="Loading" />}
-    </main> : <>
+    </main> : editor ? <ProgramPage
+      key={editor.profile.id}
+      profile={editor.profile}
+      isNew={editor.isNew}
+      state={state}
+      icon={iconFor(editor.profile.executablePath)}
+      onSave={(profile) => run(() => api.saveProfile(profile), editor.isNew ? "Couldn’t add the program" : "Couldn’t save the program")}
+      onRemove={(profile) => { setRemoveTarget(profile); setRemoveOpen(true); }}
+      onClose={() => setEditor(null)}
+    /> : <>
       <main className="page">
         <div className="page__inner">
           {state.status.message && <Alert status="warning" className="page__alert"><Alert.Indicator /><Alert.Content><Alert.Description>{state.status.message}</Alert.Description></Alert.Content></Alert>}
@@ -205,16 +214,6 @@ export default function App() {
     </>}
 
     {pickerOpen && <RunningAppPicker onPick={openProgram} onBrowse={() => { setPickerOpen(false); void addManually(); }} onClose={() => setPickerOpen(false)} />}
-    {editor && state && <ProfileEditor
-      key={editor.profile.id}
-      profile={editor.profile}
-      isNew={editor.isNew}
-      state={state}
-      icon={iconFor(editor.profile.executablePath)}
-      onSave={(profile) => run(() => api.saveProfile(profile), editor.isNew ? "Couldn’t add the program" : "Couldn’t save the program")}
-      onRemove={(profile) => { setRemoveTarget(profile); setRemoveOpen(true); }}
-      onClose={() => setEditor(null)}
-    />}
     <AlertDialog.Backdrop isOpen={removeOpen} onOpenChange={(open) => { if (!open && !removePending) setRemoveOpen(false); }}>
       <AlertDialog.Container size="sm">
         <AlertDialog.Dialog className="confirm">
