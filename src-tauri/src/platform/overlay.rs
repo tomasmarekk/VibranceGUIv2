@@ -45,6 +45,7 @@ use windows::{
             },
         },
         System::LibraryLoader::GetModuleHandleW,
+        UI::Shell::{QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState},
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, HTTRANSPARENT,
             HWND_TOPMOST, LWA_ALPHA, MSG, PM_REMOVE, PeekMessageW, RegisterClassW,
@@ -68,6 +69,20 @@ const SHADER_SOURCE: &str = include_str!("overlay.hlsl");
 const FRAME_WAIT_MS: u32 = 50;
 /// Delay before rebuilding after a failure such as a lost GPU device.
 const RETRY_DELAY: Duration = Duration::from_secs(2);
+/// How often the overlay checks whether a game switched to exclusive fullscreen.
+const MODE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+/// Shown while exclusive fullscreen hides the overlay; games label the alternative
+/// "windowed fullscreen" or "borderless".
+const EXCLUSIVE_FULLSCREEN: &str = "Color Equalizer is paused: the game runs in exclusive fullscreen, which nothing can draw over. Set its display mode to windowed fullscreen (borderless).";
+
+/// True while a Direct3D application owns a display in exclusive fullscreen. Then the
+/// display shows the game's frames directly: overlays are not composited and Desktop
+/// Duplication only sees the desktop behind the game (verified with a D3D11 test app).
+fn exclusive_fullscreen() -> bool {
+    // SAFETY: a plain shell query with no caller-provided memory.
+    let state = unsafe { SHQueryUserNotificationState() };
+    state.is_ok_and(|state| state == QUNS_RUNNING_D3D_FULL_SCREEN)
+}
 
 #[derive(Debug, thiserror::Error)]
 enum OverlayError {
@@ -643,11 +658,39 @@ impl Overlay {
     }
 
     fn run(&mut self, shared: &Shared) -> OverlayResult<()> {
+        let report = |message: Option<String>| {
+            *shared.error.lock().expect("overlay error mutex poisoned") = message;
+        };
         let mut generation = 0;
         let mut last_raise = Instant::now();
         let mut reported_ok = false;
+        let mut exclusive = false;
+        let mut last_mode_check = Instant::now() - MODE_CHECK_INTERVAL;
         while !shared.stop.load(Ordering::Relaxed) {
             pump_messages();
+            if last_mode_check.elapsed() >= MODE_CHECK_INTERVAL {
+                last_mode_check = Instant::now();
+                let now_exclusive = exclusive_fullscreen();
+                if now_exclusive != exclusive {
+                    exclusive = now_exclusive;
+                    if exclusive {
+                        tracing::warn!("color overlay paused: exclusive fullscreen is active");
+                        self.clear()?;
+                        report(Some(EXCLUSIVE_FULLSCREEN.into()));
+                    } else {
+                        tracing::info!("color overlay resumed after exclusive fullscreen");
+                        report(None);
+                        // Capture restarts so the next frame is current, not the stale desktop.
+                        self.duplication = None;
+                    }
+                }
+            }
+            if exclusive {
+                // Nothing can be drawn over exclusive fullscreen, and capture only sees
+                // the desktop behind the game, so skip the GPU work until it ends.
+                thread::sleep(MODE_CHECK_INTERVAL);
+                continue;
+            }
             let mut dirty = false;
             {
                 let rules = shared.rules.lock().expect("overlay rules mutex poisoned");
@@ -673,8 +716,9 @@ impl Overlay {
                     .draw(&self.context, &capture.view, &self.target_view, self.size);
                 self.present()?;
                 if !reported_ok {
-                    *shared.error.lock().expect("overlay error mutex poisoned") = None;
+                    report(None);
                     reported_ok = true;
+                    tracing::info!("color overlay is drawing");
                 }
             }
             if last_raise.elapsed() >= Duration::from_secs(1) {

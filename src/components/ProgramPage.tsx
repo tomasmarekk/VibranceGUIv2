@@ -111,7 +111,7 @@ export function ProgramPage({ profile, isNew, state, icon, onSave, onRemove, onC
             <div className="section__header">
               <div className="section__heading">
                 <h2 className="section__title" id="program-match">Color Equalizer</h2>
-                <p className="section__hint">Recolors one color, like enemy outlines. Drawn above the game, so use borderless or windowed mode.</p>
+                <p className="section__hint">Recolors one color, like enemy outlines. Set the game to windowed fullscreen (borderless); nothing can draw over exclusive fullscreen.</p>
               </div>
               <Button size="sm" variant="secondary" className="pill-button" isDisabled={draft.colorRules.length >= MAX_COLOR_RULES} onPress={() => setDraft({ ...draft, colorRules: [...draft.colorRules, newRule()] })}><Plus aria-hidden="true" />Add color</Button>
             </div>
